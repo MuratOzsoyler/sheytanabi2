@@ -2,33 +2,22 @@ module Main where
 
 import Prelude
 
-import Control.Monad.ST (for, foreach, run, while) as ST
+import Control.Monad.ST (run, while) as ST
 import Control.Monad.ST.Ref (modify, new, read, write) as ST
-import Control.Monad.Trampoline (done)
-import Data.Array ((..), (:))
 import Data.Array as Array
-import Data.Array as Arrsy
-import Data.Array.NonEmpty (elemLastIndex)
 import Data.Array.ST as STArray
 import Data.Foldable (fold, for_)
 import Data.Generic.Rep (class Generic)
-import Data.Identity (Identity(..))
 import Data.Maybe (fromMaybe, isJust)
-import Data.Monoid (guard)
 import Data.Ord (abs)
 import Data.Show.Generic (genericShow)
 import Data.String as String
-import Data.Traversable (traverse)
-import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Class.Console (logShow)
 import Effect.Class.Console as Console
-import Effect.Exception (throwException)
 import Node.Encoding (Encoding(..))
-import Node.FS.Stats (accessedTime)
 import Node.FS.Sync as FS
 import Node.Path (FilePath)
-import Node.Process (config)
 import Options.Applicative (Parser, ParserInfo, argument, command, execParser, fullDesc, header, help, helper, hsubparser, info, int, long, metavar, option, progDesc, short, showDefault, str, value, (<**>))
 import Partial.Unsafe (unsafeCrashWith)
 import Type.Row (type (+))
