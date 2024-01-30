@@ -1,0 +1,29 @@
+{
+  "name": "sheytanabi2",
+  "version": "0.0.1",
+  "description": "Sheytanabi'nin hissiyatıyla loto vb. gibi şans oyunlarının olası sayı kombinasyonlarını bulur",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MuratOzsoyler/sheytanabi2.git"
+  },
+  "keywords": [
+    "lotto",
+    "chance",
+    "games",
+    "purescript"
+  ],
+  "author": "Murat Özsöyler",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/MuratOzsoyler/sheytanabi2/issues"
+  },
+  "homepage": "https://github.com/MuratOzsoyler/sheytanabi2#readme",
+  "dependencies": {
+    "purescript": "^0.15.14",
+    "spago": "^0.93.24"
+  }
+}

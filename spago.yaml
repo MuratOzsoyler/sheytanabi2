@@ -1,0 +1,17 @@
+package:
+  name: sheytanabi2
+  dependencies:
+    - console
+    - effect
+    - node-fs
+    - node-path
+    - optparse
+    - prelude
+    - typelevel-prelude
+  test:
+    main: Test.Main
+    dependencies: []
+workspace:
+  package_set:
+    registry: 49.0.0
+  extra_packages: {}
