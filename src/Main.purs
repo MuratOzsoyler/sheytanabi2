@@ -8,7 +8,7 @@ import Data.Array as Array
 import Data.Array.ST as STArray
 import Data.Foldable (fold, for_)
 import Data.Generic.Rep (class Generic)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe', isJust)
 import Data.Ord (abs)
 import Data.Show.Generic (genericShow)
 import Data.String as String
@@ -91,7 +91,7 @@ findResult config initial = do
   go cnt = case _ of
     [] -> pure cnt
     cols
-      | valid cols -> do
+      | valid config cols -> do
           let textCols = String.joinWith ";" $ map show $ Array.reverse cols
           case config.command of
             Noop -> go cnt []
@@ -104,45 +104,6 @@ findResult config initial = do
               go (cnt + 1) (progress cols)
       | otherwise -> go cnt (progress cols)
     where
-    valid arr =
-      let
-        predicates = [ fstLimit, lstLimit, consecPred ]
-      in
-        Array.all (_ $ arr) predicates
-    lstLimit = Array.head >>> fromMaybe (unsafeCrashWith "lstLimit Array.head hatası") >>> (_ <= config.lastElemTopBottomLimit)
-    fstLimit = Array.last >>> fromMaybe (unsafeCrashWith "fstLimit Array.last hatası") >>> (_ >= config.firstElemTopLimit)
-    consecPred cols = ST.run do
-      arr <- STArray.thaw cols
-      gcnt <- ST.new 0 -- ardışık grup sayısı <3 olmalı 
-      prev <- ST.new =<< {- fromMaybe (unsafeCrashWith "consecPred STArray.peek hatası") <$> STArray.peek -}  STArray.pop arr
-      ascDsc <- ST.new 0
-      let
-        escPred = (\gc ad -> gc && ad)
-          <$> (ST.read gcnt <#> (_ <= config.consecutiveGroupNumLimit)) -- ardışık grup sayısı <3 olmalı
-          <*> (ST.read ascDsc <#> abs >>> (_ < config.maxConsecutiveLimit)) -- ardarda iki kez ardışık bulmamalı
-      ST.while
-        ( (\nil esc -> nil && esc)
-            <$> (STArray.length arr <#> (_ > 0)) -- dizinlide eleman olmalı
-            <*> escPred
-        )
-        do
-          mbe <- STArray.pop arr
-          mbp <- ST.read prev
-          ad <- ST.read ascDsc
-          let gcntModify = \_ -> when (ad == 0) (void $ ST.modify inc gcnt)
-          case mbp of
-            _
-              | mbp == (inc <$> mbe) && ad >= 0 -> do
-                  void $ ST.modify inc ascDsc
-                  -- when (ad == 0) (void $ ST.modify inc gcnt)
-                  gcntModify unit
-              | mbp == (dec <$> mbe) && ad <= 0 -> do
-                  void $ ST.modify dec ascDsc
-                  -- when (ad == 0) (void $ ST.modify inc gcnt)
-                  gcntModify unit
-              -- | ad /= 0 ->  
-              | otherwise -> pure unit
-      escPred
     progress init = ST.run
       ( flip STArray.withArray init \arr -> do
           incNext <- ST.new true
@@ -151,7 +112,7 @@ findResult config initial = do
             do
               i <- ST.read idx
               inxt <- ST.read incNext
-              pure $ i < config.maxCellValue && inxt
+              pure $ i < config.colsNum - 1 && inxt
             do
               i <- ST.read idx
               mbe <- STArray.peek i arr
@@ -171,8 +132,55 @@ findResult config initial = do
       -- ST.for 0 config.colsNum \i -> 
       --   STArray.modify i (const config.maxCellValue) arr
       )
-    inc = (_ + 1)
-    dec = (_ - 1)
+
+inc :: Int -> Int
+inc = (_ + 1)
+
+dec :: Int -> Int
+dec = (_ - 1)
+
+valid :: forall r. { | LimitsConfigR r } -> Array Int -> Boolean
+valid config arr =
+  let
+    predicates = [ fstLimit, lstLimit, consecPred ]
+  in
+    Array.all (_ $ arr) predicates
+  where
+  lstLimit = Array.head >>> fromMaybe' (\_ -> unsafeCrashWith "lstLimit Array.head hatası") >>> (_ >= config.lastElemTopBottomLimit)
+  fstLimit = Array.last >>> fromMaybe' (\_ -> unsafeCrashWith "fstLimit Array.last hatası") >>> (_ <= config.firstElemTopLimit)
+  consecPred cols = ST.run do
+    arr <- STArray.thaw cols
+    groupCount <- ST.new 0 -- ardışık grup sayısı <3 olmalı 
+    prev <- ST.new =<< {- fromMaybe (unsafeCrashWith "consecPred STArray.peek hatası") <$> STArray.peek -}  STArray.pop arr
+    consecCount <- ST.new 0
+    let
+      escPred = (\gc ad -> gc && ad)
+        <$> (ST.read groupCount <#> (_ <= config.consecutiveGroupNumLimit)) -- ardışık grup sayısı <3 olmalı
+        <*> (ST.read consecCount <#> abs >>> (_ < config.maxConsecutiveLimit)) -- ardarda iki kez ardışık bulmamalı
+    ST.while
+      ( (\nil esc -> nil && esc)
+          <$> (STArray.length arr <#> (_ > 0)) -- dizinlide eleman olmalı
+          <*> escPred
+      )
+      do
+        mbElem <- STArray.pop arr
+        mbPrev <- ST.read prev
+        conCount <- ST.read consecCount
+        let gcntModify = \_ -> when (conCount == 0) $ void $ ST.modify inc groupCount
+        case mbPrev of
+          _
+            | mbPrev == (inc <$> mbElem) && conCount >= 0 -> do
+                gcntModify unit
+                void $ ST.modify inc consecCount
+            | mbPrev == (dec <$> mbElem) && conCount <= 0 -> do
+                -- when (conCount == 0) $ void $ ST.modify inc groupCount
+                gcntModify unit
+                void $ ST.modify dec consecCount
+            -- gcntModify
+            -- | conCount /= 0 ->  
+            | otherwise -> ST.write 0 consecCount *> pure unit
+        ST.write mbElem prev
+    escPred
 
 optInfo :: Config -> ParserInfo Config
 optInfo config = info

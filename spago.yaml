@@ -2,6 +2,7 @@ package:
   name: sheytanabi2
   dependencies:
     - console
+    - debug
     - effect
     - node-fs
     - node-path
