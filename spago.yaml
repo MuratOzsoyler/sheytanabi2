@@ -8,6 +8,7 @@ package:
     - node-path
     - optparse
     - prelude
+    - record
     - typelevel-prelude
   test:
     main: Test.Main

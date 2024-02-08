@@ -2,24 +2,36 @@ module Main where
 
 import Prelude
 
+import Control.Monad.Except (ExceptT(..), runExcept, runExceptT, throwError)
 import Control.Monad.ST (run, while) as ST
+import Control.Monad.ST.Class (liftST)
 import Control.Monad.ST.Ref (modify, new, read, write) as ST
+import Data.Array ((!!), (..), (:))
 import Data.Array as Array
 import Data.Array.ST as STArray
+import Data.Array.ST.Partial as STArray.Partial
+import Data.Either (Either(..))
 import Data.Foldable (fold, for_)
+import Data.FoldableWithIndex (class FoldableWithIndex, foldWithIndexM, foldlWithIndex)
 import Data.Generic.Rep (class Generic)
-import Data.Maybe (fromMaybe', isJust)
+import Data.Maybe (Maybe(..), fromMaybe', isJust, maybe')
 import Data.Ord (abs)
 import Data.Show.Generic (genericShow)
 import Data.String as String
+import Data.String.Regex (Regex)
+import Data.String.Regex as Regex
+import Data.String.Regex.Flags as Regex
+import Data.String.Regex.Unsafe as Regex
+import Debug (spy)
 import Effect (Effect)
 import Effect.Class.Console (logShow)
 import Effect.Class.Console as Console
 import Node.Encoding (Encoding(..))
 import Node.FS.Sync as FS
 import Node.Path (FilePath)
-import Options.Applicative (Parser, ParserInfo, argument, command, execParser, fullDesc, header, help, helper, hsubparser, info, int, long, metavar, option, progDesc, short, showDefault, str, value, (<**>))
-import Partial.Unsafe (unsafeCrashWith)
+import Options.Applicative (Parser, ParserInfo, ReadM, argument, command, eitherReader, execParser, fullDesc, header, help, helper, hsubparser, info, int, long, metavar, option, progDesc, short, showDefault, str, value, (<**>))
+import Partial.Unsafe (unsafeCrashWith, unsafePartial)
+import Record as Record
 import Type.Row (type (+))
 
 data Target
@@ -50,36 +62,47 @@ type GlobalConfigR r =
   )
 
 type LimitsConfigR r =
-  ( lastElemTopBottomLimit :: Int
-  , firstElemTopLimit :: Int
-  , consecutiveGroupNumLimit :: Int
+  ( consecutiveGroupNumLimit :: Int
   , maxConsecutiveLimit :: Int
+  , colLimits :: Array { upper :: Int, lower :: Int }
   | r
   )
 
 type GlobalConfig = { | GlobalConfigR () }
+type LimitsConfig = { | LimitsConfigR () }
 
 type Config = { command :: Command | GlobalConfigR + LimitsConfigR + () }
 
 type State = Array Int
 
+defaultColLimits :: forall r. { | GlobalConfigR r } -> Array { upper :: Int, lower :: Int }
+defaultColLimits config =
+  let
+    colsNum = config.colsNum
+    maxValue = config.maxCellValue
+  in
+    Array.foldr (\el res -> { lower: colsNum - el, upper: maxValue - el } : res) [] (0 .. (colsNum - 1))
+
+defaultConfig :: Config
 defaultConfig =
-  { colsNum: 6
-  , maxCellValue: 60
-  , command: Noop
-  , lastElemTopBottomLimit: 16
-  , firstElemTopLimit: 46
-  , consecutiveGroupNumLimit: 2
-  , maxConsecutiveLimit: 2
-  } :: Config
+  let
+    global = { colsNum: 6, maxCellValue: 60 }
+    limits' = { colLimits: [], consecutiveGroupNumLimit: 2, maxConsecutiveLimit: 2 }
+    limits = limits' { colLimits = defaultColLimits global }
+    config = Record.merge global limits # Record.merge { command: Noop }
+  in
+    config
+
+-- data ProgressStatus = NoMore | IncNext | CheckNext
 
 main :: Effect Unit
 main = do
   config <- execParser $ optInfo defaultConfig
   logShow defaultConfig
   logShow config
-
-  findResult config $ Array.replicate config.colsNum 1
+  case colLimitsOK config of
+    Left err -> Console.error $ "Kolon limitlerinde hata oluştu: \n\t" <> String.joinWith "\n\t" err
+    Right _ -> findResult config $ map (_.lower) config.colLimits
 
 findResult :: Config -> State -> Effect Unit
 findResult config initial = do
@@ -95,43 +118,58 @@ findResult config initial = do
           let textCols = String.joinWith ";" $ map show $ Array.reverse cols
           case config.command of
             Noop -> go cnt []
-            Count -> go (cnt + 1) (progress cols)
+            Count -> go (cnt + 1) (progress config cols)
             Write Print -> do
               Console.log textCols
-              go (cnt + 1) (progress cols)
+              go (cnt + 1) (progress config cols)
             Write (File path) -> do
               FS.appendTextFile UTF8 path textCols
-              go (cnt + 1) (progress cols)
-      | otherwise -> go cnt (progress cols)
-    where
-    progress init = ST.run
-      ( flip STArray.withArray init \arr -> do
-          incNext <- ST.new true
-          idx <- ST.new 0
-          ST.while
-            do
-              i <- ST.read idx
-              inxt <- ST.read incNext
-              pure $ i < config.colsNum - 1 && inxt
-            do
-              i <- ST.read idx
-              mbe <- STArray.peek i arr
-              for_ mbe \e -> do
-                if e < config.maxCellValue then do
-                  void $ STArray.modify i inc arr
-                  void $ ST.write false incNext
-                else do
-                  void $ STArray.poke i 1 arr
-                  void $ ST.write true incNext
-          -- en son eleman da son raddesine gelmişse kolonları boşalt ki
-          -- üst katman işin bittiğini anlasın
-          whenM (ST.read incNext)
-            $ ST.while
-                (STArray.pop arr <#> isJust)
-                (pure unit)
-      -- ST.for 0 config.colsNum \i -> 
-      --   STArray.modify i (const config.maxCellValue) arr
-      )
+              go (cnt + 1) (progress config cols)
+      | otherwise -> go cnt (progress config cols)
+
+progress :: Config -> Array Int -> Array Int
+progress config init = ST.run
+  ( flip STArray.withArray init \arr -> do
+      incNext <- ST.new true
+      -- prev <- ST.new Nothing
+      idx <- ST.new (-1)
+      ST.while ((&&) <$> (ST.modify inc idx <#> (_ < config.colsNum)) <*> ST.read incNext) do
+        i <- ST.read idx
+        let { lower, upper } = config.colLimits !! i # fromMaybe' \_ -> unsafeCrashWith $ "progress: Array.index error at idx " <> show i
+        elem <- unsafePartial $ STArray.Partial.peek i arr -- <#> fromMaybe' \_ -> unsafeCrashWith $ "progress: STArray peek error at idx " <> show i
+        if elem < upper then do
+          void $ STArray.modify i inc arr
+          void $ ST.write false incNext
+        else do
+          newVal <- STArray.peek (i + 1) arr >>= pure <<< case _ of
+            Just n ->
+              let
+                nextVal = n + 2
+              in
+                if nextVal < lower then lower else nextVal
+            Nothing -> elem + 1
+          void $ STArray.poke i newVal arr
+          void $ ST.write true incNext
+
+      overflow <- ST.read incNext
+      -- en son eleman da son raddesine gelmişse kolonları boşalt ki
+      -- üst katman işin bittiğini anlasın
+      if overflow then
+        ST.while
+          (STArray.pop arr <#> isJust)
+          (pure unit)
+      else do
+        void $ ST.write (config.colsNum - 1) idx
+        ST.while (ST.modify dec idx <#> (_ >= 0)) do
+          i <- ST.read idx
+          this <- STArray.peek i arr
+          when (this > Just (config.maxCellValue - i)) do
+            next <- unsafePartial $ STArray.Partial.peek (i + 1) arr -- <#> fromMaybe' \_ -> unsafeCrashWith $ "progress: epilog STArray peek error at idx " <> show i
+            void $ STArray.poke i (next + 1) arr
+
+  -- ST.for 0 config.colsNum \i -> 
+  --   STArray.modify i (const config.maxCellValue) arr
+  )
 
 inc :: Int -> Int
 inc = (_ + 1)
@@ -140,14 +178,14 @@ dec :: Int -> Int
 dec = (_ - 1)
 
 valid :: forall r. { | LimitsConfigR r } -> Array Int -> Boolean
-valid config arr =
+valid config columns =
   let
-    predicates = [ fstLimit, lstLimit, consecPred ]
+    predicates = [ {- fstLimit, lstLimit, -} consecPred ]
   in
-    Array.all (_ $ arr) predicates
+    Array.all (_ $ columns) predicates
   where
-  lstLimit = Array.head >>> fromMaybe' (\_ -> unsafeCrashWith "lstLimit Array.head hatası") >>> (_ >= config.lastElemTopBottomLimit)
-  fstLimit = Array.last >>> fromMaybe' (\_ -> unsafeCrashWith "fstLimit Array.last hatası") >>> (_ <= config.firstElemTopLimit)
+  -- lstLimit = Array.head >>> fromMaybe' (\_ -> unsafeCrashWith "lstLimit Array.head hatası") >>> (_ >= config.lastElemBottomLimit)
+  -- fstLimit = Array.last >>> fromMaybe' (\_ -> unsafeCrashWith "fstLimit Array.last hatası") >>> (_ <= config.firstElemTopLimit)
   consecPred cols = ST.run do
     arr <- STArray.thaw cols
     groupCount <- ST.new 0 -- ardışık grup sayısı <3 olmalı 
@@ -190,7 +228,7 @@ optInfo config = info
       <> header "Şans oyunları analiz programı"
   )
 
-globalOptsParser :: Config -> Parser GlobalConfig
+globalOptsParser :: forall r. { | GlobalConfigR r } -> Parser { | GlobalConfigR () }
 globalOptsParser config = ado
   colsNum <-
     option int $ long "sutun-sayisi"
@@ -209,9 +247,96 @@ globalOptsParser config = ado
       <> value config.maxCellValue
   in { colsNum, maxCellValue }
 
+limitOptsParser :: forall r. { | LimitsConfigR r } -> Parser { | LimitsConfigR () }
+limitOptsParser config = ado
+  maxConsecutiveLimit <-
+    option int $ long "en-cok-ardisik-sayisi"
+      <> short 'c'
+      <> help "En çok ardışık gelebilecek değer sayısı"
+      <> metavar "TAMSAYI"
+      <> showDefault
+      <> value config.maxConsecutiveLimit
+  consecutiveGroupNumLimit <-
+    option
+      int $ long "en-cok-ardisik-grup-sayisi"
+      <> short 'g'
+      <> help "En çok ardışık grup sayısı"
+      <> metavar "TAMSAYI"
+      <> showDefault
+      <> value config.consecutiveGroupNumLimit
+  colLimits <-
+    option
+      colLimitsParser $ long "kolon-deger-limitleri"
+      <> short 'l'
+      <> help "Kolonlara girilebilecek değer aralıkları (virgülle ayrılmış 99-99 ya da 99- ya da -99 ya da - ya da boş değer)"
+      <> metavar "DEGER_ARALIĞI_LİSTESİ"
+      <> showDefault
+      <> value config.colLimits
+  in { consecutiveGroupNumLimit, maxConsecutiveLimit, colLimits }
+
+colLimitRegex :: Regex
+colLimitRegex = Regex.unsafeRegex "^\\d{1,2}-\\d{1,2}$" Regex.noFlags
+
+colLimitsParser :: ReadM (Array { lower :: Int, upper :: Int })
+colLimitsParser =
+  eitherReader \s -> runExcept do
+    let elems = String.trim <$> String.split (String.Pattern ",") s
+    foldWithIndexM parseLimits [] elems
+  -- (i → a → b → m a) → a → f b → m a
+  where
+  parseLimits idx result elem = do
+    parsed <- case parseElem elem of
+      Nothing -> throwError $ show idx <> ". kolon sınırlarını çözümlerken hata oluştu: '" <> elem <> "'"
+      Just limits -> throwError $ "çözümlenen değerler:" <> show limits
+    pure $ parsed : result
+  parseElem elem = Regex.match colLimitRegex elem
+
+-- (i → b → a → b) → b → f a → b
+
+colLimitsOK :: Config -> Either (Array String) Config
+colLimitsOK config@{ maxCellValue, colLimits, colsNum } =
+  ST.run do
+    errors <- STArray.new
+    let
+      addError msg = void $ STArray.push msg errors
+      colLimitsLen = Array.length colLimits
+    limits <- STArray.thaw colLimits
+    if (colLimitsLen /= colsNum) then
+      addError $ "Kolon limiti sayısı (" <> show colLimitsLen <> ") kolon sayısına (" <> show colsNum <> ") eşit olmalıdır"
+    else do
+      idx <- ST.new colLimitsLen
+      let
+        checkLimit idx { upper, lower } =
+          unless (upper >= lower) $ addError $ "alt sınır üst sınırdan büyük olamaz (alt=" <> show lower <> ",üst=" <> show upper <> ",dizin=" <> show idx <> ")"
+        checkBounds idx value msg = do
+          let
+            maxValue = maxCellValue - idx
+            minValue = colsNum - idx
+          unless (value <= maxValue) $ addError $ msg <> " sınır (" <> show value <> ") olabilecek en üst sınırdan (" <> show maxValue <> ") büyük olamaz (dizin=" <> show idx <> ")"
+          unless (value >= minValue) $ addError $ msg <> " sınır (" <> show value <> ") olabilecek en alt sınırdan (" <> show minValue <> ") küçük olamaz (dizin=" <> show idx <> ")"
+        checkNeighbors idx elem prev = do
+          unless (elem.upper > prev.upper) $ addError $ show idx <> ". sıradaki elemanın üst sınırı " <> show (idx + 1) <> ". sıradaki elemanın üst sınırından küçük ya da eşit olamaz"
+          unless (elem.lower > prev.lower) $ addError $ show idx <> ". sıradaki elemanın alt sınırı " <> show (idx + 1) <> ". sıradaki elemanın alt sınırından küçük ya da eşit olamaz"
+          unless (elem.upper >= prev.lower) $ addError $ show idx <> ". sıradaki elemanın üst sınırı " <> show (idx + 1) <> ". sıradaki elemanın alt sınırından küçük olamaz"
+      ST.while (ST.modify dec idx <#> (_ >= 0)) do
+        i <- ST.read idx
+        mbelem <- STArray.peek i limits
+        case mbelem of
+          Nothing -> void $ STArray.push ("colLimitsOK: invalid index to peek: " <> show i) errors
+          Just elem -> do
+            checkLimit i elem
+            checkBounds i elem.upper "üst"
+            checkBounds i elem.lower "alt"
+            mbprev <- STArray.peek (i + 1) limits
+            maybe' (\_ -> pure unit) (checkNeighbors i elem) mbprev
+    ifM (STArray.length errors <#> (_ > 0))
+      (STArray.freeze errors <#> Left)
+      (STArray.freeze limits <#> ((config { colLimits = _ }) >>> Right))
+
 optParser :: Config -> Parser Config
 optParser config = ado
-  { colsNum, maxCellValue } <- globalOptsParser config
+  globalConfig <- globalOptsParser config
+  limitsConfig <- limitOptsParser config
   command <- hsubparser $ fold
     [ command "say" $ info (pure Count) $ fullDesc <> progDesc "Bulunan kombinasyonların sayısını verir"
     , command "yaz" $ info
@@ -229,5 +354,4 @@ optParser config = ado
         )
         (fullDesc <> progDesc "Kombinasyonları ekrana ya da verilen dosyaya yazar")
     ]
-
-  in config { colsNum = colsNum, maxCellValue = maxCellValue, command = command }
+  in { command } `Record.merge` globalConfig `Record.merge` limitsConfig
