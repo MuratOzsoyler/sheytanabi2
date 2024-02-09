@@ -24,10 +24,11 @@ import Data.String.Regex.Flags as Regex
 import Data.String.Regex.Unsafe as Regex
 import Debug (spy)
 import Effect (Effect)
+import Effect.Aff (Aff, launchAff_)
 import Effect.Class.Console (logShow)
 import Effect.Class.Console as Console
 import Node.Encoding (Encoding(..))
-import Node.FS.Sync as FS
+import Node.FS.Aff as FS
 import Node.Path (FilePath)
 import Options.Applicative (Parser, ParserInfo, ReadM, argument, command, eitherReader, execParser, fullDesc, header, help, helper, hsubparser, info, int, long, metavar, option, progDesc, short, showDefault, str, value, (<**>))
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
@@ -102,9 +103,9 @@ main = do
   logShow config
   case colLimitsOK config of
     Left err -> Console.error $ "Kolon limitlerinde hata oluştu: \n\t" <> String.joinWith "\n\t" err
-    Right _ -> findResult config $ map (_.lower) config.colLimits
+    Right _ -> launchAff_ $ findResult config $ map (_.lower) config.colLimits
 
-findResult :: Config -> State -> Effect Unit
+findResult :: Config -> State -> Aff Unit
 findResult config initial = do
   cnt <- go 0 initial
   case config.command of
@@ -162,8 +163,8 @@ progress config init = ST.run
         void $ ST.write (config.colsNum - 1) idx
         ST.while (ST.modify dec idx <#> (_ >= 0)) do
           i <- ST.read idx
-          this <- STArray.peek i arr
-          when (this > Just (config.maxCellValue - i)) do
+          this <- unsafePartial $ STArray.Partial.peek i arr
+          when (this > config.maxCellValue - i) do
             next <- unsafePartial $ STArray.Partial.peek (i + 1) arr -- <#> fromMaybe' \_ -> unsafeCrashWith $ "progress: epilog STArray peek error at idx " <> show i
             void $ STArray.poke i (next + 1) arr
 
