@@ -74,6 +74,7 @@ type GlobalConfigR r =
 type LimitsConfigR r =
   ( consecutiveGroupNumLimit :: Int
   , maxConsecutiveLimit :: Int
+  , maxConsecutiveGroupLengthTotal :: Int
   , colLimits :: Array { upper :: Int, lower :: Int }
   | r
   )
@@ -97,7 +98,7 @@ defaultConfig :: Config
 defaultConfig =
   let
     global = { colsNum: 6, maxCellValue: 60 }
-    limits' = { colLimits: [], consecutiveGroupNumLimit: 2, maxConsecutiveLimit: 2 }
+    limits' = { colLimits: [], consecutiveGroupNumLimit: 2, maxConsecutiveLimit: 3, maxConsecutiveGroupLengthTotal: 5 }
     limits = limits' { colLimits = defaultColLimits global }
     config = Record.merge global limits # Record.merge { command: Noop }
   in
@@ -223,10 +224,12 @@ valid config columns =
     groupCount <- ST.new 0 -- ardışık grup sayısı <3 olmalı 
     prev <- ST.new =<< {- fromMaybe (unsafeCrashWith "consecPred STArray.peek hatası") <$> STArray.peek -}  STArray.pop arr
     consecCount <- ST.new 0
+    totalConsecCount <- ST.new 0
     let
-      escPred = (\gc ad -> gc && ad)
-        <$> (ST.read groupCount <#> (_ <= config.consecutiveGroupNumLimit)) -- ardışık grup sayısı <3 olmalı
-        <*> (ST.read consecCount <#> abs >>> (_ < config.maxConsecutiveLimit)) -- ardarda iki kez ardışık bulmamalı
+      escPred = (\gc ad to -> gc && ad && to)
+        <$> (ST.read groupCount <#> (_ <= config.consecutiveGroupNumLimit)) -- ardışık grup sayısı <=2 olmalı
+        <*> (ST.read consecCount <#> abs >>> (_ <= config.maxConsecutiveLimit)) -- ardarda iki kezden fazla ardışık bulmamalı
+        <*> (ST.read totalConsecCount <#> (_ <= config.maxConsecutiveGroupLengthTotal)) -- toplam ardışıklar 5'i geçmemeli
     ST.while
       ( (\nil esc -> nil && esc)
           <$> (STArray.length arr <#> (_ > 0)) -- dizinlide eleman olmalı
@@ -241,11 +244,11 @@ valid config columns =
           _
             | mbPrev == (inc <$> mbElem) && conCount >= 0 -> do
                 gcntModify unit
-                void $ ST.modify inc consecCount
+                void $ ST.modify inc consecCount <* ST.modify inc totalConsecCount
             | mbPrev == (dec <$> mbElem) && conCount <= 0 -> do
                 -- when (conCount == 0) $ void $ ST.modify inc groupCount
                 gcntModify unit
-                void $ ST.modify dec consecCount
+                void $ ST.modify dec consecCount <* ST.modify inc totalConsecCount
             -- gcntModify
             -- | conCount /= 0 ->  
             | otherwise -> ST.write 0 consecCount *> pure unit
@@ -296,15 +299,23 @@ limitOptsParser config = ado
       <> metavar "TAMSAYI"
       <> showDefault
       <> value config.consecutiveGroupNumLimit
+  maxConsecutiveGroupLengthTotal <-
+    option
+      int $ long "en-cok-ardisik-grup-uzunlugu-toplami"
+      <> short 'g'
+      <> help "En çok ardışık grup uzunlukları toplamı"
+      <> metavar "TAMSAYI"
+      <> showDefault
+      <> value config.maxConsecutiveGroupLengthTotal
   colLimits <-
     option
       colLimitsParser $ long "kolon-deger-limitleri"
       <> short 'l'
-      <> help "Kolonlara girilebilecek değer aralıkları (virgülle ayrılmış 99-99 ya da 99- ya da -99 ya da - ya da boş değer)"
+      <> help "Kolonlara girilebilecek değer aralıkları (virgülle ayrılmış 99-99 biçiminde değerler)"
       <> metavar "DEGER_ARALIĞI_LİSTESİ"
       <> showDefault
       <> value config.colLimits
-  in { consecutiveGroupNumLimit, maxConsecutiveLimit, colLimits }
+  in { consecutiveGroupNumLimit, maxConsecutiveLimit, colLimits, maxConsecutiveGroupLengthTotal }
 
 colLimitRegex :: Regex
 colLimitRegex = Regex.unsafeRegex "^(\\d{1,2})-(\\d{1,2})$" Regex.noFlags
