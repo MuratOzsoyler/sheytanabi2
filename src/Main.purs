@@ -307,7 +307,7 @@ limitOptsParser config = ado
   in { consecutiveGroupNumLimit, maxConsecutiveLimit, colLimits }
 
 colLimitRegex :: Regex
-colLimitRegex = Regex.unsafeRegex "^\\d{1,2}-\\d{1,2}$" Regex.noFlags
+colLimitRegex = Regex.unsafeRegex "^(\\d{1,2})-(\\d{1,2})$" Regex.noFlags
 
 colLimitsParser :: ReadM (Array { lower :: Int, upper :: Int })
 colLimitsParser =
@@ -319,7 +319,8 @@ colLimitsParser =
   parseLimits idx result elem = do
     parsed <- case parseElem elem of
       Nothing -> throwError $ show idx <> ". kolon sınırlarını çözümlerken hata oluştu: '" <> elem <> "'"
-      Just limits -> throwError $ "çözümlenen değerler:" <> show limits
+      Just (NonEmptyArray [ _, Just l, Just u ]) | Just lower <- Int.fromString l, Just upper <- Int.fromString u -> pure { lower, upper }
+      Just limits -> throwError $ show idx <> ". kolon sınırları için çözümlenemeyen değerler:" <> show limits
     pure $ parsed : result
   parseElem elem = Regex.match colLimitRegex elem
 
