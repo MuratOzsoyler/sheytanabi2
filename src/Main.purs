@@ -38,6 +38,12 @@ import Partial.Unsafe (unsafeCrashWith, unsafePartial)
 import Record as Record
 import Type.Row (type (+))
 
+progName :: String
+progName = "sheytanabi2"
+
+version :: String
+version = "0.0.1"
+
 data Target
   = Print
   | File FilePath
@@ -101,7 +107,10 @@ defaultConfig =
 
 main :: Effect Unit
 main = do
-  config <- execParser $ optInfo defaultConfig
+  let parseInfo = optInfo defaultConfig
+  let hdr = parseInfo # unwrap # (_.infoHeader) <#> flatten # extractChunk # renderCompact # displayS
+  config <- execParser parseInfo
+  Console.log hdr
   logShow defaultConfig
   logShow config
   case colLimitsOK config of
@@ -248,7 +257,7 @@ optInfo config = info
   (optParser config <**> helper)
   ( fullDesc
       <> progDesc "Verilen kriterlere göre en şanslı kombinasyonları bulur"
-      <> header "Şans oyunları analiz programı"
+      <> header (progName <> ": Şans oyunları analiz programı " <> version)
   )
 
 globalOptsParser :: forall r. { | GlobalConfigR r } -> Parser { | GlobalConfigR () }
