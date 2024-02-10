@@ -23,10 +23,12 @@ import Data.String.Regex as Regex
 import Data.String.Regex.Flags as Regex
 import Data.String.Regex.Unsafe as Regex
 import Debug (spy)
-import Effect (Effect)
+import Effect (Effect, untilE)
 import Effect.Aff (Aff, launchAff_)
+import Effect.Class (liftEffect)
 import Effect.Class.Console (logShow)
 import Effect.Class.Console as Console
+import Effect.Ref as Ref
 import Node.Encoding (Encoding(..))
 import Node.FS.Aff as FS
 import Node.Path (FilePath)
@@ -103,30 +105,49 @@ main = do
   logShow config
   case colLimitsOK config of
     Left err -> Console.error $ "Kolon limitlerinde hata oluştu: \n\t" <> String.joinWith "\n\t" err
-    Right _ -> launchAff_ $ findResult config $ map (_.lower) config.colLimits
+    Right _ -> findResult config $ map (_.lower) config.colLimits
 
-findResult :: Config -> State -> Aff Unit
+findResult :: Config -> State -> Effect Unit
 findResult config initial = do
-  cnt <- go 0 initial
+  cnt <- go initial
   case config.command of
     Count -> Console.log $ "Seçilen kombinasyon sayısı: " <> show cnt
     _ -> pure unit
   where
-  go cnt = case _ of
-    [] -> pure cnt
-    cols
-      | valid config cols -> do
-          let textCols = String.joinWith ";" $ map show $ Array.reverse cols
-          case config.command of
-            Noop -> go cnt []
-            Count -> go (cnt + 1) (progress config cols)
-            Write Print -> do
-              Console.log textCols
-              go (cnt + 1) (progress config cols)
-            Write (File path) -> do
-              FS.appendTextFile UTF8 path textCols
-              go (cnt + 1) (progress config cols)
-      | otherwise -> go cnt (progress config cols)
+  go cols = do
+    colsRef <- Ref.new cols
+    countRef <- Ref.new 0
+    untilE do
+      cs <- Ref.read colsRef
+      when (valid config cs) do
+        let textCols = String.joinWith ";" $ map show $ Array.reverse cols
+        case config.command of
+          Noop -> Ref.write (config.colLimits <#> (_.upper)) colsRef
+          Count -> Ref.modify_ inc countRef
+          Write Print -> do
+            Console.log textCols
+            Ref.modify_ inc countRef
+          Write (File path) -> do
+            launchAff_ $ FS.appendTextFile UTF8 path textCols
+            Ref.modify_ inc countRef
+      Ref.modify (progress config) colsRef <#> Array.null
+    Ref.read countRef
+
+-- go cnt = case _ of
+--   [] -> pure cnt
+--   cols
+--     | valid config cols -> do
+--         let textCols = String.joinWith ";" $ map show $ Array.reverse cols
+--         case config.command of
+--           Noop -> go cnt []
+--           Count -> go (cnt + 1) (progress config cols)
+--           Write Print -> do
+--             Console.log textCols
+--             go (cnt + 1) (progress config cols)
+--           Write (File path) -> do
+--             FS.appendTextFile UTF8 path textCols
+--             go (cnt + 1) (progress config cols)
+--     | otherwise -> go cnt (progress config cols)
 
 progress :: Config -> Array Int -> Array Int
 progress config init = ST.run
