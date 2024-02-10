@@ -42,7 +42,7 @@ progName :: String
 progName = "sheytanabi2"
 
 version :: String
-version = "0.0.1"
+version = "0.0.2"
 
 data Target
   = Print
