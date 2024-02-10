@@ -2,30 +2,30 @@ module Main where
 
 import Prelude
 
-import Control.Monad.Except (ExceptT(..), runExcept, runExceptT, throwError)
+import Control.Monad.Except (runExcept, throwError)
 import Control.Monad.ST (run, while) as ST
-import Control.Monad.ST.Class (liftST)
 import Control.Monad.ST.Ref (modify, new, read, write) as ST
 import Data.Array ((!!), (..), (:))
 import Data.Array as Array
+import Data.Array.NonEmpty.Internal (NonEmptyArray(..))
 import Data.Array.ST as STArray
 import Data.Array.ST.Partial as STArray.Partial
 import Data.Either (Either(..))
-import Data.Foldable (fold, for_)
-import Data.FoldableWithIndex (class FoldableWithIndex, foldWithIndexM, foldlWithIndex)
+import Data.Foldable (fold)
+import Data.FoldableWithIndex (foldWithIndexM)
 import Data.Generic.Rep (class Generic)
+import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe', isJust, maybe')
+import Data.Newtype (unwrap)
 import Data.Ord (abs)
 import Data.Show.Generic (genericShow)
 import Data.String as String
 import Data.String.Regex (Regex)
-import Data.String.Regex as Regex
-import Data.String.Regex.Flags as Regex
-import Data.String.Regex.Unsafe as Regex
-import Debug (spy)
+import Data.String.Regex (match) as Regex
+import Data.String.Regex.Flags (noFlags) as Regex
+import Data.String.Regex.Unsafe (unsafeRegex) as Regex
 import Effect (Effect, untilE)
-import Effect.Aff (Aff, launchAff_)
-import Effect.Class (liftEffect)
+import Effect.Aff (launchAff_)
 import Effect.Class.Console (logShow)
 import Effect.Class.Console as Console
 import Effect.Ref as Ref
@@ -33,6 +33,7 @@ import Node.Encoding (Encoding(..))
 import Node.FS.Aff as FS
 import Node.Path (FilePath)
 import Options.Applicative (Parser, ParserInfo, ReadM, argument, command, eitherReader, execParser, fullDesc, header, help, helper, hsubparser, info, int, long, metavar, option, progDesc, short, showDefault, str, value, (<**>))
+import Options.Applicative.Help (displayS, extractChunk, flatten, renderCompact)
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
 import Record as Record
 import Type.Row (type (+))
