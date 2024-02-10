@@ -2,38 +2,47 @@ module Main where
 
 import Prelude
 
-import Control.Monad.Except (ExceptT(..), runExcept, runExceptT, throwError)
+import Control.Monad.Except (runExcept, throwError)
 import Control.Monad.ST (run, while) as ST
-import Control.Monad.ST.Class (liftST)
 import Control.Monad.ST.Ref (modify, new, read, write) as ST
 import Data.Array ((!!), (..), (:))
 import Data.Array as Array
+import Data.Array.NonEmpty.Internal (NonEmptyArray(..))
 import Data.Array.ST as STArray
 import Data.Array.ST.Partial as STArray.Partial
 import Data.Either (Either(..))
-import Data.Foldable (fold, for_)
-import Data.FoldableWithIndex (class FoldableWithIndex, foldWithIndexM, foldlWithIndex)
+import Data.Foldable (fold)
+import Data.FoldableWithIndex (foldWithIndexM)
 import Data.Generic.Rep (class Generic)
+import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe', isJust, maybe')
+import Data.Newtype (unwrap)
 import Data.Ord (abs)
 import Data.Show.Generic (genericShow)
 import Data.String as String
 import Data.String.Regex (Regex)
-import Data.String.Regex as Regex
-import Data.String.Regex.Flags as Regex
-import Data.String.Regex.Unsafe as Regex
-import Debug (spy)
-import Effect (Effect)
-import Effect.Aff (Aff, launchAff_)
+import Data.String.Regex (match) as Regex
+import Data.String.Regex.Flags (noFlags) as Regex
+import Data.String.Regex.Unsafe (unsafeRegex) as Regex
+import Effect (Effect, untilE)
+import Effect.Aff (launchAff_)
 import Effect.Class.Console (logShow)
 import Effect.Class.Console as Console
+import Effect.Ref as Ref
 import Node.Encoding (Encoding(..))
 import Node.FS.Aff as FS
 import Node.Path (FilePath)
 import Options.Applicative (Parser, ParserInfo, ReadM, argument, command, eitherReader, execParser, fullDesc, header, help, helper, hsubparser, info, int, long, metavar, option, progDesc, short, showDefault, str, value, (<**>))
+import Options.Applicative.Help (displayS, extractChunk, flatten, renderCompact)
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
 import Record as Record
 import Type.Row (type (+))
+
+progName :: String
+progName = "sheytanabi2"
+
+version :: String
+version = "0.0.1"
 
 data Target
   = Print
@@ -65,6 +74,7 @@ type GlobalConfigR r =
 type LimitsConfigR r =
   ( consecutiveGroupNumLimit :: Int
   , maxConsecutiveLimit :: Int
+  , maxConsecutiveGroupLengthTotal :: Int
   , colLimits :: Array { upper :: Int, lower :: Int }
   | r
   )
@@ -88,7 +98,7 @@ defaultConfig :: Config
 defaultConfig =
   let
     global = { colsNum: 6, maxCellValue: 60 }
-    limits' = { colLimits: [], consecutiveGroupNumLimit: 2, maxConsecutiveLimit: 2 }
+    limits' = { colLimits: [], consecutiveGroupNumLimit: 2, maxConsecutiveLimit: 3, maxConsecutiveGroupLengthTotal: 5 }
     limits = limits' { colLimits = defaultColLimits global }
     config = Record.merge global limits # Record.merge { command: Noop }
   in
@@ -98,35 +108,57 @@ defaultConfig =
 
 main :: Effect Unit
 main = do
-  config <- execParser $ optInfo defaultConfig
+  let parseInfo = optInfo defaultConfig
+  let hdr = parseInfo # unwrap # (_.infoHeader) <#> flatten # extractChunk # renderCompact # displayS
+  config <- execParser parseInfo
+  Console.log hdr
   logShow defaultConfig
   logShow config
   case colLimitsOK config of
     Left err -> Console.error $ "Kolon limitlerinde hata oluştu: \n\t" <> String.joinWith "\n\t" err
-    Right _ -> launchAff_ $ findResult config $ map (_.lower) config.colLimits
+    Right _ -> findResult config $ map (_.lower) config.colLimits
 
-findResult :: Config -> State -> Aff Unit
+findResult :: Config -> State -> Effect Unit
 findResult config initial = do
-  cnt <- go 0 initial
+  cnt <- go initial
   case config.command of
     Count -> Console.log $ "Seçilen kombinasyon sayısı: " <> show cnt
     _ -> pure unit
   where
-  go cnt = case _ of
-    [] -> pure cnt
-    cols
-      | valid config cols -> do
-          let textCols = String.joinWith ";" $ map show $ Array.reverse cols
-          case config.command of
-            Noop -> go cnt []
-            Count -> go (cnt + 1) (progress config cols)
-            Write Print -> do
-              Console.log textCols
-              go (cnt + 1) (progress config cols)
-            Write (File path) -> do
-              FS.appendTextFile UTF8 path textCols
-              go (cnt + 1) (progress config cols)
-      | otherwise -> go cnt (progress config cols)
+  go cols = do
+    colsRef <- Ref.new cols
+    countRef <- Ref.new 0
+    untilE do
+      cs <- Ref.read colsRef
+      when (valid config cs) do
+        let textCols = String.joinWith ";" $ map show $ Array.reverse cols
+        case config.command of
+          Noop -> Ref.write (config.colLimits <#> (_.upper)) colsRef
+          Count -> Ref.modify_ inc countRef
+          Write Print -> do
+            Console.log textCols
+            Ref.modify_ inc countRef
+          Write (File path) -> do
+            launchAff_ $ FS.appendTextFile UTF8 path textCols
+            Ref.modify_ inc countRef
+      Ref.modify (progress config) colsRef <#> Array.null
+    Ref.read countRef
+
+-- go cnt = case _ of
+--   [] -> pure cnt
+--   cols
+--     | valid config cols -> do
+--         let textCols = String.joinWith ";" $ map show $ Array.reverse cols
+--         case config.command of
+--           Noop -> go cnt []
+--           Count -> go (cnt + 1) (progress config cols)
+--           Write Print -> do
+--             Console.log textCols
+--             go (cnt + 1) (progress config cols)
+--           Write (File path) -> do
+--             FS.appendTextFile UTF8 path textCols
+--             go (cnt + 1) (progress config cols)
+--     | otherwise -> go cnt (progress config cols)
 
 progress :: Config -> Array Int -> Array Int
 progress config init = ST.run
@@ -192,10 +224,12 @@ valid config columns =
     groupCount <- ST.new 0 -- ardışık grup sayısı <3 olmalı 
     prev <- ST.new =<< {- fromMaybe (unsafeCrashWith "consecPred STArray.peek hatası") <$> STArray.peek -}  STArray.pop arr
     consecCount <- ST.new 0
+    totalConsecCount <- ST.new 0
     let
-      escPred = (\gc ad -> gc && ad)
-        <$> (ST.read groupCount <#> (_ <= config.consecutiveGroupNumLimit)) -- ardışık grup sayısı <3 olmalı
-        <*> (ST.read consecCount <#> abs >>> (_ < config.maxConsecutiveLimit)) -- ardarda iki kez ardışık bulmamalı
+      escPred = (\gc ad to -> gc && ad && to)
+        <$> (ST.read groupCount <#> (_ <= config.consecutiveGroupNumLimit)) -- ardışık grup sayısı <=2 olmalı
+        <*> (ST.read consecCount <#> abs >>> (_ <= config.maxConsecutiveLimit)) -- ardarda iki kezden fazla ardışık bulmamalı
+        <*> (ST.read totalConsecCount <#> (_ <= config.maxConsecutiveGroupLengthTotal)) -- toplam ardışıklar 5'i geçmemeli
     ST.while
       ( (\nil esc -> nil && esc)
           <$> (STArray.length arr <#> (_ > 0)) -- dizinlide eleman olmalı
@@ -210,11 +244,11 @@ valid config columns =
           _
             | mbPrev == (inc <$> mbElem) && conCount >= 0 -> do
                 gcntModify unit
-                void $ ST.modify inc consecCount
+                void $ ST.modify inc consecCount <* ST.modify inc totalConsecCount
             | mbPrev == (dec <$> mbElem) && conCount <= 0 -> do
                 -- when (conCount == 0) $ void $ ST.modify inc groupCount
                 gcntModify unit
-                void $ ST.modify dec consecCount
+                void $ ST.modify dec consecCount <* ST.modify inc totalConsecCount
             -- gcntModify
             -- | conCount /= 0 ->  
             | otherwise -> ST.write 0 consecCount *> pure unit
@@ -226,7 +260,7 @@ optInfo config = info
   (optParser config <**> helper)
   ( fullDesc
       <> progDesc "Verilen kriterlere göre en şanslı kombinasyonları bulur"
-      <> header "Şans oyunları analiz programı"
+      <> header (progName <> ": Şans oyunları analiz programı " <> version)
   )
 
 globalOptsParser :: forall r. { | GlobalConfigR r } -> Parser { | GlobalConfigR () }
@@ -265,18 +299,26 @@ limitOptsParser config = ado
       <> metavar "TAMSAYI"
       <> showDefault
       <> value config.consecutiveGroupNumLimit
+  maxConsecutiveGroupLengthTotal <-
+    option
+      int $ long "en-cok-ardisik-grup-uzunlugu-toplami"
+      <> short 'g'
+      <> help "En çok ardışık grup uzunlukları toplamı"
+      <> metavar "TAMSAYI"
+      <> showDefault
+      <> value config.maxConsecutiveGroupLengthTotal
   colLimits <-
     option
       colLimitsParser $ long "kolon-deger-limitleri"
       <> short 'l'
-      <> help "Kolonlara girilebilecek değer aralıkları (virgülle ayrılmış 99-99 ya da 99- ya da -99 ya da - ya da boş değer)"
+      <> help "Kolonlara girilebilecek değer aralıkları (virgülle ayrılmış 99-99 biçiminde değerler)"
       <> metavar "DEGER_ARALIĞI_LİSTESİ"
       <> showDefault
       <> value config.colLimits
-  in { consecutiveGroupNumLimit, maxConsecutiveLimit, colLimits }
+  in { consecutiveGroupNumLimit, maxConsecutiveLimit, colLimits, maxConsecutiveGroupLengthTotal }
 
 colLimitRegex :: Regex
-colLimitRegex = Regex.unsafeRegex "^\\d{1,2}-\\d{1,2}$" Regex.noFlags
+colLimitRegex = Regex.unsafeRegex "^(\\d{1,2})-(\\d{1,2})$" Regex.noFlags
 
 colLimitsParser :: ReadM (Array { lower :: Int, upper :: Int })
 colLimitsParser =
@@ -288,7 +330,8 @@ colLimitsParser =
   parseLimits idx result elem = do
     parsed <- case parseElem elem of
       Nothing -> throwError $ show idx <> ". kolon sınırlarını çözümlerken hata oluştu: '" <> elem <> "'"
-      Just limits -> throwError $ "çözümlenen değerler:" <> show limits
+      Just (NonEmptyArray [ _, Just l, Just u ]) | Just lower <- Int.fromString l, Just upper <- Int.fromString u -> pure { lower, upper }
+      Just limits -> throwError $ show idx <> ". kolon sınırları için çözümlenemeyen değerler:" <> show limits
     pure $ parsed : result
   parseElem elem = Regex.match colLimitRegex elem
 
